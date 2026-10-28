@@ -1,79 +1,139 @@
-# TicketHub Design Document
+# TicketHub – Event Ticketing System Design
 
 ## 1. Requirements
 
 ### Functional Requirements
-- Users can browse upcoming events (concerts, sports, theater) with filters by date, location, genre, and price range.
-- Users can view detailed event pages including venue map, available seats, and pricing tiers.
-- Authenticated users can select and temporarily hold seats for a limited time (e.g., 10 minutes).
-- Users can complete payment for held seats and receive digital tickets.
-- Users can view their past and upcoming tickets in a personal dashboard.
-- Administrators can create/manage events, set seat inventories, and monitor sales.
-- The system must prevent two users from purchasing the same seat (double-booking prevention).
+- Users can browse and search events by date, city, genre, and price.
+- Users can view an event’s details and an interactive seat map showing which seats are available, held, or sold.
+- Authenticated users can select seats and place a temporary hold (10 minutes).
+- Users can pay for held seats and receive digital tickets (with QR code).
+- Users can view their purchased tickets.
+- The system must never allow two people to buy the same seat.
 
-### Non-Functional Requirements
-- **Speed / Latency**: Page loads under 200 ms for normal browsing; seat availability and hold operations under 500 ms even under peak load. Ticket purchase confirmation within 2 seconds.
-- **Correctness**: Strong consistency for seat inventory and order placement. No overselling of seats. Atomic payment + seat assignment.
-- **Fairness**: During high-demand sales, a fair queuing or rate-limiting mechanism so early arrivals are not starved by bots or later users. Holds expire after a fixed window so abandoned carts release seats.
-- **Availability**: 99.9% uptime for browsing; ticket sales remain available during traffic spikes (graceful degradation preferred over total outage).
-- **Scalability**: Handle normal daily traffic and sudden 4×–10× spikes without redesign.
-- **Security**: Secure authentication, PCI-compliant payment handling (via payment gateway), protection against inventory racing conditions.
+### Non-Functional Requirements (Critical)
+- **Speed**: Normal page loads < 200 ms. Seat map and hold creation < 500 ms even under peak load. Payment confirmation < 2 seconds.
+- **Correctness**: Strong consistency on seat inventory. Zero overselling. Seat assignment and payment must be atomic.
+- **Fairness**: During a popular on-sale, users who arrive early must not be blocked by bots or later users. Abandoned holds must release seats quickly so others can buy them. A waiting room / rate limiter is used when traffic exceeds capacity.
+- **Availability**: 99.9% uptime for browsing. During big sales the system degrades gracefully (queue users) rather than crashing.
+- **Scalability**: Must handle both normal traffic and sudden multi-ten times spikes without rewriting the system.
 
 ## 2. Traffic Estimates
 
 ### Normal Day
-- 2,000,000 registered users (total base).
-- 50,000 unique visitors per day.
-- Each visitor views ~10 pages → **500,000 page views / day**.
-- Average ~5.8 requests/second (500k / 86,400).
-- 5,000 tickets sold per day → roughly 0.06 ticket sales per second average.
-- Peak hours (evenings) might reach 3–5× average → ~20–30 RPS for browsing.
+- 2 000 000 registered users
+- 50 000 people visit the site
+- Each person views 10 pages → **500 000 page views per day**
+- Average request rate: 500 000 ÷ 86 400 ≈ **5.8 requests/second**
+- Peak hours (evenings) ≈ 4× average → **≈ 25 requests/second**
+- 5 000 tickets sold → very low write rate (\~0.06 sales/second)
 
-### Big Sale (Popular Concert On-Sale)
-- 20,000 seats released.
-- 200,000 people attempt to buy within the first 10 minutes.
-- Arrival rate ≈ 200,000 / 600 s ≈ **333 attempts per second**.
-- Each user typically performs several actions: view event, load seat map, select seats, hold, pay → conservative estimate of **1,000–2,000 RPS** during the opening minutes.
-- Successful sales: 20,000 seats → high contention on a small set of seat records.
-- Comparison: Normal peak (~25 RPS) vs Big Sale (~1,500 RPS) → roughly **60× traffic spike** focused on a few endpoints and a narrow set of database rows.
+### Big Sale (Popular Concert)
+- 20 000 seats go on sale
+- 200 000 people try to buy them in the first 10 minutes
+- Arrival rate: 200 000 ÷ 600 seconds = **≈ 333 people per second**
+- Each person does multiple actions (view event → load seat map → select seats → hold → pay). Realistic peak load on the critical path: **1 000 – 2 000 requests/second**
+- All contention is focused on only 20 000 seat rows
+
+**Comparison**  
+Normal peak ≈ 25 RPS  
+Big-sale peak ≈ 1 500 RPS  
+→ Roughly **60× traffic spike**, concentrated on a few endpoints and a small number of database rows. This is the classic “flash sale” problem.
 
 ## 3. API Design
 
-Base URL: `/api/v1`
+Base path: `/api/v1`
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/events` | List/browse events. Query params: `date`, `city`, `genre`, `page`, `limit`. Returns paginated event summaries. |
-| GET | `/events/{eventId}` | Event details + venue info. |
-| GET | `/events/{eventId}/seats` | Seat map and availability for an event. Returns sections, rows, seat status (available/held/sold). |
-| POST | `/events/{eventId}/holds` | Hold one or more seats. Body: `{ seatIds: [], quantity? }`. Creates a short-lived hold (TTL 10 min) tied to the authenticated user. Returns `holdId` and expiry. |
-| POST | `/orders` | Complete purchase. Body: `{ holdId, paymentToken }`. Validates hold, processes payment, converts hold → confirmed order + tickets. |
-| GET | `/tickets` | List the current user’s tickets (upcoming + past). |
-| GET | `/tickets/{ticketId}` | Single ticket details (QR code / barcode data). |
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/events` | Browse / search events (query: date, city, genre, page, limit) |
+| GET | `/events/{eventId}` | Get full event details |
+| GET | `/events/{eventId}/seats` | Get seat map + current availability |
+| POST | `/events/{eventId}/holds` | Hold one or more seats for 10 minutes |
+| POST | `/orders` | Pay for a hold and create the order + tickets |
+| GET | `/tickets` | List the current user’s tickets |
+| GET | `/tickets/{ticketId}` | Get a single ticket (includes QR data) |
 
-Additional supporting endpoints (auth, admin) exist but are outside the minimum five required.
+These five core endpoints (browse, seats, hold, pay, view tickets) fully cover the required user journeys.
 
 ## 4. Data Model
 
 ### Tables
 
 **users**
-- `id` (PK, UUID)
-- `email` (unique)
-- `password_hash`
-- `name`
-- `created_at`
+- id (UUID, Primary key)
+- email (VARCHAR, Unique)
+- password_hash (VARCHAR)
+- name (VARCHAR)
+- created_at (TIMESTAMP)
 
 **events**
-- `id` (PK, UUID)
-- `title`
-- `description`
-- `venue_id` (or embedded venue fields)
-- `start_time`
-- `status` (draft / published / on_sale / sold_out / cancelled)
-- `created_at`
+- id (UUID, Primary key)
+- title (VARCHAR)
+- description (TEXT)
+- venue (VARCHAR)
+- start_time (TIMESTAMP)
+- status (ENUM: draft / published / on_sale / sold_out)
+- created_at (TIMESTAMP)
 
 **seats**
-- `id` (PK, UUID)
-- `event_id` (FK → events
-... 
+- id (UUID, Primary key)
+- event_id (UUID, FK → events)
+- section (VARCHAR)
+- row (VARCHAR)
+- number (VARCHAR)
+- price_cents (INTEGER)
+- status (ENUM: available / held / sold)
+- hold_id (UUID, nullable)
+- held_until (TIMESTAMP, nullable)
+- Unique constraint: (event_id, section, row, number)
+
+**orders**
+- id (UUID, Primary key)
+- user_id (UUID, FK → users)
+- event_id (UUID, FK → events)
+- status (ENUM: pending / paid / cancelled)
+- total_cents (INTEGER)
+- created_at (TIMESTAMP)
+- paid_at (TIMESTAMP, nullable)
+
+**order_items**
+- id (UUID, Primary key)
+- order_id (UUID, FK → orders)
+- seat_id (UUID, FK → seats, unique)
+- price_cents (INTEGER)
+
+### Relationships
+- One Event → many Seats
+- One User → many Orders
+- One Order → many Order Items
+- One Seat → at most one Order Item
+
+### How Double-Booking Is Prevented
+We use database constraints and transactions:
+
+1. Unique constraint on (event_id, section, row, number)
+2. When holding seats we run a transaction:
+   BEGIN;
+   SELECT * FROM seats WHERE id IN (...) AND status = 'available' FOR UPDATE;
+   UPDATE seats SET status = 'held', hold_id = ..., held_until = now() + interval '10 minutes' WHERE id IN (...);
+   COMMIT;
+3. The FOR UPDATE lock makes sure only one person can take a seat.
+4. Holds expire after 10 minutes and seats become available again.
+5. Final payment changes status from held to sold inside another short transaction.
+
+This guarantees no two people can buy the same seat.
+
+## 5. Architecture
+
+Clients → CDN → API Gateway + Load Balancer (with Waiting Room) → Browse Service / Seat-Hold Service / Order Service → Redis + PostgreSQL → Payment Gateway
+
+- CDN handles static files
+- Waiting Room protects the system during big sales
+- Redis stores temporary holds with automatic expiry
+- PostgreSQL is the source of truth and uses transactions + row locks
+- This design survives the 200,000 people trying to buy 20,000 seats
+
+## 6. Trade-offs
+
+1. Strong consistency vs speed: We use locking so double-booking is impossible, even if it is a bit slower under heavy load.
+2. 10-minute hold time: Gives users enough time to pay, but temporarily locks seats. Shorter holds free seats faster but frustrate real users.
