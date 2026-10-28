@@ -1,0 +1,7 @@
+# Day 8 Reflection
+
+The most difficult concept in the course for me was designing for extreme traffic spikes while still guaranteeing correctness. Early on I thought of systems mainly in terms of happy-path flows and average load. Understanding how a sudden 60× jump in concurrent users interacts with database locking, cache invalidation, and fair queuing required several re-reads of the material on transactions, isolation levels, and horizontal scaling. I overcame it by working through concrete numbers (the 200 000 buyers in ten minutes) and sketching the exact sequence of SELECT FOR UPDATE → status change → commit for a contested seat. Once I could see the race condition on paper, the need for holds with TTLs and a waiting-room pattern became obvious.
+
+Based on the feedback I received on the earlier design work, the part of the capstone I would improve is the depth of the non-functional requirements and the explicit treatment of failure modes. I had listed latency and availability targets but did not sufficiently justify them or describe what happens when a payment provider times out or a hold expires mid-checkout. In a revised version I would add clearer SLOs, circuit-breaker behaviour, and a short “what if” section for each critical path.
+
+Next I want to deepen my practical knowledge of distributed systems: specifically Redis patterns for inventory, PostgreSQL locking under load, and the design of virtual waiting rooms. I also plan to implement a small prototype of the hold-and-purchase flow so the theoretical guarantees become muscle memory.
